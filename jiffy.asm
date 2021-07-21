@@ -15,7 +15,10 @@ intret     equ     03f0h
 iserve     equ     03f6h
 ivec       equ     03fdh
 himem      equ     0442h
+version    equ     0400h
 date_time  equ     0475h
+secnum     equ     047bh
+secden     equ     047dh
 
            ; Executable program header
 
@@ -30,9 +33,9 @@ start:     org     2000h
            ; Build information
 
            db      7+80h              ; month
-           db      18                 ; day
+           db      21                 ; day
            dw      2021               ; year
-           dw      1                  ; build
+           dw      2                  ; build
            db      'Written by David S. Madole',0
 
            ; Since this requires the timer that in unique to the 1804/5/6
@@ -50,47 +53,64 @@ main:      adi     0                  ; clear df so 1802 will take lbnf
            ; in particular we need support for himem variable to allocate
            ; memory for persistent module to use.
 
-           ldi     high himem         ; get pointer to himem variable
+           ldi     high k_ver         ; get pointer to himem variable
            phi     r7
-           ldi     low himem
+           ldi     low k_ver
            plo     r7
 
-           ldn     r7                 ; if high byte is zero, not supported
-           lbz     versfail
+           lda     r7                 ; if high byte is zero, not supported
+           lbnz    allocmem
+
+           lda     r7
+           smi     4
+           lbnf    versfail
+
 
            ; Allocate memory below himem for the driver code block, leaving
            ; address to copy code into in register R8 and R9 and length
            ; of code to copy in RF. Updates himem to reflect allocation.
 
-allocmem:  ldi     high himem         ; pointer to top of memory variable
+allocmem:  ldi     high end-module
+           phi     rc
+           ldi     low end-module
+           plo     rc
+
+           ldi     255
            phi     r7
-           ldi     low himem
+           ldi     4
            plo     r7
 
-           inc     r7                 ; move to lsb of himem
-           ldn     r7                 ;  subtract size to install from himem
-           smi     low end-module-1   ;  keep borrow flag of result
-           ldi     0                  ;  but round down to page boundary
+           sep     scall
+           dw      o_alloc
+
+           glo     rf
            plo     r8
            plo     r9
-
-           dec     r7                 ; move to msb of himem and finish
-           ldn     r7                 ;  subtraction to get code block address
-           smbi    high end-module-1
+           ghi     rf
            phi     r8
            phi     r9
 
-           dec     r8                 ; set himem to one less than block
 
-           ghi     r8                 ; update himem to below new block
-           str     r7
-           inc     r7
-           glo     r8
-           str     r7
-           dec     r7
+           ; set seconds fractional fields
 
-           inc     r8                 ; restore to start of code block
+           ldi     high secden+1       ; get pointer to memory variables
+           phi     rd                  ;  point to lsb of fraction
+           ldi     low secden+1
+           plo     rd
 
+           sex     rd
+
+           ldi     low 15625
+           stxd
+           ldi     high 15625
+           stxd
+
+           ldi     low 15625
+           stxd
+           ldi     high 15625
+           stxd
+
+           sex     r2
 
            ; Copy the code of the persistent module to the memory block that
            ; was just allocated. R8 and R9 both point to this block before
@@ -101,15 +121,17 @@ allocmem:  ldi     high himem         ; pointer to top of memory variable
            ldi     low module
            plo     rd
 
-           ldi     high end-module+255
+           ldi     high end-module
            phi     rf
-           ldi     low end-module+255
+           ldi     low end-module
            plo     rf
 
 copycode:  lda     rd                 ; copy code to destination address
            str     r9
            inc     r9
            dec     rf
+           glo     rf
+           lbnz    copycode
            ghi     rf
            lbnz    copycode
 
@@ -165,7 +187,7 @@ copycode:  lda     rd                 ; copy code to destination address
 
            sep     scall
            dw      o_inmsg
-           db      '1804/5/6 Clock Driver Build 1 for Elf/OS',13,10,0
+           db      '1804/5/6 Clock Driver Build 2 for Elf/OS',13,10,0
            sep     sret
 
            ; Failure message if not run on an 1804/5/6 processor
@@ -202,8 +224,7 @@ intcmplt:  sex     r2                  ; the next isr might assume this
 
            ; Entry point is here
 
-intenter:  ;db      68h,3eh,gottimer & 0ffh
-           bci     gottimer
+intenter:  bci     gottimer
 
 intretrn:  lbr     intret
 
@@ -222,41 +243,39 @@ gottimer:  glo     rd                  ; we need a register to do anything
            ghi     rd
            stxd
 
-           ghi     r1                  ; get pointer to memory variables
+           ldi     high secnum+1       ; get pointer to memory variables
            phi     rd                  ;  point to lsb of fraction
-           ldi     low fracts+1
+           ldi     low secnum+1
            plo     rd
 
            sex     rd
 
            ; Count ticks in fractional seconds of time
 
-           ldn     rd                  ; subtract the numerator of the tick
-           smi     low 256             ;  length from the time fraction
+           ldn     rd                  ; add the numerator of the tick
+           adi     low 256             ;  length to the time fraction
            stxd
 
            ldn     rd                  ; continue with the msb
-           smbi    high 256 
+           adci    high 256 
            str     rd
 
-           bdf     intcmplt            ; exit if result is positive
-
            inc     rd                  ; move back to lsb
+           ldn     rd                  ; compare to the denominator
+           smi     low 15625           ;  to see if overflowed
 
-           ldn     rd                  ; add the denominator to the
-           adi     low 15625           ;  remaining negative result
-           stxd
-
+           dec     rd
            ldn     rd                  ; same with the msb
-           adci    high 15625
+           smbi    high 15625
+
+           bnf     intcmplt            ; exit if less than
+
+           inc     rd                  ; clear numerator
+           ldi     0
+           stxd
            stxd
 
            ; Update the real time when the fraction crosses one second
-
-           ldi     high date_time+5    ; point to seconds byte in kernel
-           phi     rd
-           ldi     low date_time+5
-           plo     rd
 
            ldn     rd                  ; get seconds
            sdi     59                  ;  sutract from last second
@@ -337,8 +356,6 @@ year:      shlc                        ; get a 1 and store (df was set)
            str     rd                  ;  and store back
 
            br      intcmplt
-
-fracts:    dw      15625               ; this is where the fraction is kept
 
 end:       ; That's all folks!
 
